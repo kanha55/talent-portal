@@ -16,6 +16,7 @@ import {
   findUserByEmail,
   getUserBySession,
 } from "@/lib/store";
+import { notifyAdminNewSignup } from "@/lib/notifications/signup";
 
 const SESSION_COOKIE = "tp_session";
 
@@ -61,6 +62,12 @@ export async function signUpWithEmail(formData: FormData) {
       username: parsed.data.username,
       email: parsed.data.email,
       passwordHash: hashPassword(parsed.data.password),
+    });
+
+    void notifyAdminNewSignup({
+      name: user.name,
+      email: user.email,
+      username: user.username,
     });
 
     const session = await createSession(user.id);

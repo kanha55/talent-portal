@@ -1,6 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { Redis } from "@upstash/redis";
+
 import {
   atsReportSchema,
   createEmptyResume,
@@ -21,7 +23,9 @@ import type {
   User,
 } from "@/lib/types";
 
-const STORE_PATH = path.join(process.cwd(), "data", "app-store.json");
+const STORE_PATH =
+  process.env.STORE_PATH?.trim() || path.join(process.cwd(), "data", "app-store.json");
+const REDIS_STORE_KEY = "talent-portal:app-store";
 
 const defaultStore: AppStore = {
   users: [],
@@ -33,21 +37,18 @@ const defaultStore: AppStore = {
   applications: [],
 };
 
-async function ensureStore() {
-  await mkdir(path.dirname(STORE_PATH), { recursive: true });
+function getRedisClient() {
+  const url = process.env.UPSTASH_REDIS_REST_URL?.trim();
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
 
-  try {
-    await readFile(STORE_PATH, "utf8");
-  } catch {
-    await writeFile(STORE_PATH, JSON.stringify(defaultStore, null, 2), "utf8");
+  if (!url || !token) {
+    return null;
   }
+
+  return new Redis({ url, token });
 }
 
-export async function readStore(): Promise<AppStore> {
-  await ensureStore();
-  const raw = await readFile(STORE_PATH, "utf8");
-  const parsed = JSON.parse(raw) as Partial<AppStore>;
-
+function normalizeStore(parsed: Partial<AppStore> | null | undefined): AppStore {
   const store = {
     ...defaultStore,
     ...parsed,
@@ -68,7 +69,55 @@ export async function readStore(): Promise<AppStore> {
   return store;
 }
 
+async function readStoreFromRedis(): Promise<AppStore | null> {
+  const redis = getRedisClient();
+  if (!redis) {
+    return null;
+  }
+
+  const parsed = await redis.get<Partial<AppStore>>(REDIS_STORE_KEY);
+  return normalizeStore(parsed ?? undefined);
+}
+
+async function writeStoreToRedis(store: AppStore) {
+  const redis = getRedisClient();
+  if (!redis) {
+    return false;
+  }
+
+  await redis.set(REDIS_STORE_KEY, store);
+  return true;
+}
+
+async function ensureStoreFile() {
+  await mkdir(path.dirname(STORE_PATH), { recursive: true });
+
+  try {
+    await readFile(STORE_PATH, "utf8");
+  } catch {
+    await writeFile(STORE_PATH, JSON.stringify(defaultStore, null, 2), "utf8");
+  }
+}
+
+export async function readStore(): Promise<AppStore> {
+  const redisStore = await readStoreFromRedis();
+  if (redisStore) {
+    return redisStore;
+  }
+
+  await ensureStoreFile();
+  const raw = await readFile(STORE_PATH, "utf8");
+  const parsed = JSON.parse(raw) as Partial<AppStore>;
+
+  return normalizeStore(parsed);
+}
+
 async function writeStore(store: AppStore) {
+  const wroteToRedis = await writeStoreToRedis(store);
+  if (wroteToRedis) {
+    return;
+  }
+
   await writeFile(STORE_PATH, JSON.stringify(store, null, 2), "utf8");
 }
 
