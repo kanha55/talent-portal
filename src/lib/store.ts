@@ -37,56 +37,71 @@ const defaultStore: AppStore = {
   applications: [],
 };
 
-function getRedisClient() {
-  const url = process.env.UPSTASH_REDIS_REST_URL?.trim();
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
+function isVercelRuntime() {
+  return process.env.VERCEL === "1";
+}
 
-  if (!url || !token) {
+function isRedisConfigured() {
+  return Boolean(
+    process.env.UPSTASH_REDIS_REST_URL?.trim() && process.env.UPSTASH_REDIS_REST_TOKEN?.trim(),
+  );
+}
+
+function getRedisClient() {
+  if (!isRedisConfigured()) {
     return null;
   }
 
-  return new Redis({ url, token });
+  return new Redis({
+    url: process.env.UPSTASH_REDIS_REST_URL!.trim(),
+    token: process.env.UPSTASH_REDIS_REST_TOKEN!.trim(),
+  });
+}
+
+function asArray<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : [];
 }
 
 function normalizeStore(parsed: Partial<AppStore> | null | undefined): AppStore {
-  const store = {
-    ...defaultStore,
-    ...parsed,
+  const store: AppStore = {
+    users: asArray(parsed?.users),
+    sessions: asArray(parsed?.sessions),
+    baseResumes: asArray(parsed?.baseResumes),
+    targetJobs: asArray(parsed?.targetJobs),
+    tailoredResumeVersions: asArray(parsed?.tailoredResumeVersions),
+    atsReports: asArray(parsed?.atsReports),
+    applications: asArray(parsed?.applications),
   };
 
   store.users = store.users.map((user) => migrateLegacyUser(user));
 
   for (const resume of store.baseResumes) {
     const user = store.users.find((entry) => entry.id === resume.userId);
-    resume.content = normalizeResumeContent(resume.content, { fallbackEmail: user?.email });
+    try {
+      resume.content = normalizeResumeContent(resume.content, { fallbackEmail: user?.email });
+    } catch {
+      resume.content = createEmptyResume(
+        resume.userId,
+        user?.email ?? "user@example.com",
+        user?.name ?? "User",
+      ).content;
+    }
   }
 
   for (const version of store.tailoredResumeVersions) {
     const user = store.users.find((entry) => entry.id === version.userId);
-    version.resume = normalizeResumeContent(version.resume, { fallbackEmail: user?.email });
+    try {
+      version.resume = normalizeResumeContent(version.resume, { fallbackEmail: user?.email });
+    } catch {
+      version.resume = createEmptyResume(
+        version.userId,
+        user?.email ?? "user@example.com",
+        user?.name ?? "User",
+      ).content;
+    }
   }
 
   return store;
-}
-
-async function readStoreFromRedis(): Promise<AppStore | null> {
-  const redis = getRedisClient();
-  if (!redis) {
-    return null;
-  }
-
-  const parsed = await redis.get<Partial<AppStore>>(REDIS_STORE_KEY);
-  return normalizeStore(parsed ?? undefined);
-}
-
-async function writeStoreToRedis(store: AppStore) {
-  const redis = getRedisClient();
-  if (!redis) {
-    return false;
-  }
-
-  await redis.set(REDIS_STORE_KEY, store);
-  return true;
 }
 
 async function ensureStoreFile() {
@@ -100,9 +115,25 @@ async function ensureStoreFile() {
 }
 
 export async function readStore(): Promise<AppStore> {
-  const redisStore = await readStoreFromRedis();
-  if (redisStore) {
-    return redisStore;
+  if (isRedisConfigured()) {
+    try {
+      const redis = getRedisClient()!;
+      const parsed = await redis.get<Partial<AppStore>>(REDIS_STORE_KEY);
+      return normalizeStore(parsed ?? undefined);
+    } catch (error) {
+      console.error("[store] Redis read failed:", error);
+      if (isVercelRuntime()) {
+        return normalizeStore(undefined);
+      }
+      throw error;
+    }
+  }
+
+  if (isVercelRuntime()) {
+    console.warn(
+      "[store] UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN are missing on Vercel.",
+    );
+    return normalizeStore(undefined);
   }
 
   await ensureStoreFile();
@@ -113,9 +144,23 @@ export async function readStore(): Promise<AppStore> {
 }
 
 async function writeStore(store: AppStore) {
-  const wroteToRedis = await writeStoreToRedis(store);
-  if (wroteToRedis) {
-    return;
+  if (isRedisConfigured()) {
+    try {
+      const redis = getRedisClient()!;
+      await redis.set(REDIS_STORE_KEY, store);
+      return;
+    } catch (error) {
+      console.error("[store] Redis write failed:", error);
+      throw new Error(
+        "Could not save data. Check UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Vercel.",
+      );
+    }
+  }
+
+  if (isVercelRuntime()) {
+    throw new Error(
+      "Database not configured. Add UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Vercel environment variables.",
+    );
   }
 
   await writeFile(STORE_PATH, JSON.stringify(store, null, 2), "utf8");
@@ -129,9 +174,10 @@ export async function mutateStore<T>(mutator: (store: AppStore) => T | Promise<T
 }
 
 function migrateLegacyUser(user: User): User {
+  const email = user.email?.trim() || "";
   const username =
     user.username?.trim() ||
-    user.email.split("@")[0]?.replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 32) ||
+    email.split("@")[0]?.replace(/[^a-zA-Z0-9_]/g, "_").slice(0, 32) ||
     "user";
 
   return {

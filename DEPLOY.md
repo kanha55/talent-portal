@@ -61,6 +61,7 @@ npm run dev
 
 ## Troubleshooting
 
+- **"This page couldn't load" / server error** → Add `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` in Vercel → Settings → Environment Variables, then **Redeploy**. Push the latest code fix if you haven't already.
 - **Signups don’t persist on Vercel** → Add Upstash Redis env vars and redeploy.
 - **No signup emails** → Check `ADMIN_NOTIFICATION_EMAIL`, `RESEND_API_KEY`, and Resend dashboard logs.
 - **AI tailoring fails** → Verify `CURSOR_API_KEY` or `OPENAI_API_KEY` in Vercel env settings.
