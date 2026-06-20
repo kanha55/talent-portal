@@ -12,6 +12,7 @@ import {
   type TailoredResumeVersion,
   type TargetJob,
 } from "@/lib/resume/schema";
+import { repairImportedExperiences, repairResumeCertifications } from "@/lib/resume/importResume";
 import type {
   AppStore,
   ApplicationRecord,
@@ -218,7 +219,6 @@ export async function getDashboardData(userId: string) {
 export async function createResume(userId: string, email: string, name: string) {
   return mutateStore((store) => {
     const resume = createEmptyResume(userId, email, name);
-    resume.content.title = `Resume ${store.baseResumes.filter((entry) => entry.userId === userId).length + 1}`;
     store.baseResumes.push(resume);
     return resume;
   });
@@ -242,7 +242,11 @@ export async function updateResume(userId: string, resumeId: string, resume: Bas
     }
 
     const user = store.users.find((entry) => entry.id === userId);
-    const validated = normalizeResumeContent(resume, { fallbackEmail: user?.email });
+    const repaired = repairResumeCertifications({
+      ...resume,
+      experiences: repairImportedExperiences(resume.experiences),
+    });
+    const validated = normalizeResumeContent(repaired, { fallbackEmail: user?.email });
     existing.content = validated;
     existing.updatedAt = new Date().toISOString();
 
@@ -313,8 +317,20 @@ export async function getResumeWorkspace(userId: string, resumeId: string) {
   const jobs = store.targetJobs.filter((entry) => entry.userId === userId);
   const applications = store.applications.filter((entry) => entry.userId === userId);
 
+  const user = store.users.find((entry) => entry.id === userId);
+  const repairedContent = normalizeResumeContent(
+    repairResumeCertifications({
+      ...resume.content,
+      experiences: repairImportedExperiences(resume.content.experiences),
+    }),
+    { fallbackEmail: user?.email },
+  );
+
   return {
-    resume,
+    resume: {
+      ...resume,
+      content: repairedContent,
+    },
     versions,
     reports,
     jobs,

@@ -8,10 +8,19 @@ import {
   dedupeStringsCaseInsensitive,
   normalizeResumeContent,
   parseSkillGroups,
+  sanitizePersonalUrl,
   type ResumeContent,
 } from "@/lib/resume/schema";
 import { isArtifactSkill } from "@/lib/jobs/cleanJobDescription";
 import { sanitizeText } from "@/lib/resume/sanitizeContent";
+
+function coalescePersonalUrl(extracted: string | undefined, fallback: string) {
+  if (extracted?.trim()) {
+    return sanitizePersonalUrl(extracted);
+  }
+
+  return sanitizePersonalUrl(fallback);
+}
 
 const sectionAliases = new Map<string, keyof ParsedSections>([
   ["summary", "summary"],
@@ -23,7 +32,9 @@ const sectionAliases = new Map<string, keyof ParsedSections>([
   ["core skills", "skills"],
   ["competencies", "skills"],
   ["certifications", "certifications"],
+  ["certificates", "certifications"],
   ["licenses", "certifications"],
+  ["licenses & certifications", "certifications"],
   ["experience", "experience"],
   ["work experience", "experience"],
   ["professional experience", "experience"],
@@ -199,47 +210,628 @@ function splitSkillValues(lines: string[]) {
 }
 
 function parseCertificationSection(lines: string[]) {
-  const blocks = splitBlocks(lines.filter((line) => !isPdfPageArtifact(line)));
-  return blocks.map((block, index) => {
-    const cleanLines = block.filter((line) => !isPdfPageArtifact(line));
-    return {
+  const cleanLines = compactLines(lines.filter((line) => !isPdfPageArtifact(line)));
+  if (!cleanLines.length) {
+    return [];
+  }
+
+  const inlineFromSection = extractInlineCertificationsFromText(cleanLines.join("\n"));
+  if (inlineFromSection.length) {
+    return inlineFromSection;
+  }
+
+  const blocks = splitBlocks(cleanLines);
+  const fromBlocks = blocks
+    .map((block, index) => {
+      const blockLines = block.filter((line) => !isPdfPageArtifact(line));
+      const inline = extractInlineCertificationsFromText(blockLines.join("\n"));
+      if (inline.length) {
+        return inline[0];
+      }
+
+      return {
+        id: `cert-${index + 1}`,
+        name: blockLines[0] ?? "",
+        issuer: blockLines[2] ?? "",
+        date: blockLines[1] ?? "",
+      };
+    })
+    .filter((entry) => entry.name.trim());
+
+  if (fromBlocks.length) {
+    return fromBlocks;
+  }
+
+  return cleanLines
+    .map((line, index) => ({
       id: `cert-${index + 1}`,
-      name: cleanLines[0] ?? "",
-      issuer: cleanLines[2] ?? "",
-      date: cleanLines[1] ?? "",
-    };
-  }).filter((entry) => entry.name.trim());
+      name: line.replace(/^[-*•]\s*/, "").trim(),
+      issuer: "",
+      date: "",
+    }))
+    .filter((entry) => entry.name.length > 2 && !/^certifications?\s*:/i.test(entry.name));
+}
+
+function extractInlineCertificationsFromText(text: string) {
+  const certifications: ResumeContent["certifications"] = [];
+  const seen = new Set<string>();
+
+  for (const match of text.matchAll(/certifications?\s*:\s*([^\n]+)/gi)) {
+    const payload = match[1].trim().replace(/[.;]+$/, "");
+    const names = payload
+      .split(/[,;|]/)
+      .map((name) => name.trim())
+      .filter((name) => name.length > 2);
+
+    for (const name of names) {
+      const key = name.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      certifications.push({
+        id: `cert-${certifications.length + 1}`,
+        name,
+        issuer: "",
+        date: "",
+      });
+    }
+  }
+
+  return certifications;
+}
+
+function mergeCertificationLists(
+  primary: ResumeContent["certifications"],
+  additional: ResumeContent["certifications"],
+) {
+  const seen = new Set(primary.map((cert) => cert.name.toLowerCase()));
+  const merged = [...primary];
+
+  for (const cert of additional) {
+    const key = cert.name.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    merged.push({
+      ...cert,
+      id: `cert-${merged.length + 1}`,
+    });
+  }
+
+  return merged;
+}
+
+function stripInlineCertificationBullets(bullets: string[]) {
+  return bullets.filter((bullet) => !/^certifications?\s*:/i.test(bullet.trim()));
+}
+
+export function repairResumeCertifications(content: ResumeContent): ResumeContent {
+  const corpus = [
+    content.summary,
+    ...content.experiences.flatMap((experience) => experience.bullets),
+    ...content.projects.flatMap((project) => project.bullets),
+    ...content.education.flatMap((entry) => entry.highlights),
+  ].join("\n");
+
+  const inlineCerts = extractInlineCertificationsFromText(corpus);
+  const certifications = mergeCertificationLists(content.certifications, inlineCerts);
+
+  if (!inlineCerts.length) {
+    return content;
+  }
+
+  return {
+    ...content,
+    certifications,
+    experiences: content.experiences.map((experience) => ({
+      ...experience,
+      bullets: stripInlineCertificationBullets(experience.bullets),
+    })),
+    projects: content.projects.map((project) => ({
+      ...project,
+      bullets: stripInlineCertificationBullets(project.bullets),
+    })),
+  };
+}
+
+function collectCertifications(
+  normalizedText: string,
+  sections: ParsedSections,
+  fallback: ResumeContent["certifications"],
+) {
+  const sectionCerts = parseCertificationSection(sections.certifications);
+  const inlineCerts = extractInlineCertificationsFromText(normalizedText);
+  const merged = mergeCertificationLists(sectionCerts, inlineCerts);
+
+  return merged.length ? merged : fallback;
+}
+
+const DATE_RANGE_PATTERN =
+  /(?:[A-Za-z]{3,9}\s+\d{4}|\d{4})(?:\s*(?:-|–|—|to)\s*(?:[A-Za-z]{3,9}\s+\d{4}|\d{4}|Present|Current))?/gi;
+
+const DATE_SPLIT_PATTERN = /\s*(?:-|–|—|to)\s*/i;
+
+function normalizeDateValue(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed || /^unknown$/i.test(trimmed)) {
+    return "";
+  }
+
+  if (trimmed.length <= 2 && !/^(19|20)\d{2}$/.test(trimmed)) {
+    return "";
+  }
+
+  if (!/(present|current|\d{4}|[A-Za-z]{3,9}\s+\d{4})/i.test(trimmed)) {
+    return "";
+  }
+
+  return trimmed;
+}
+
+function extractDateRangeFromText(text: string) {
+  const match = text.match(DATE_RANGE_PATTERN);
+  if (!match?.[0]) {
+    return { matched: false, startDate: "", endDate: "", remainder: text.trim() };
+  }
+
+  const firstRange = match[0];
+  const parts = firstRange.split(DATE_SPLIT_PATTERN).map((part) => part.trim());
+
+  return {
+    matched: true,
+    startDate: normalizeDateValue(parts[0] ?? ""),
+    endDate: normalizeDateValue(parts[1] ?? parts[0] ?? ""),
+    remainder: text.replace(firstRange, "").trim(),
+  };
+}
+
+function isDateRangeLine(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const extracted = extractDateRangeFromText(trimmed);
+  return extracted.matched && extracted.remainder.length <= 3;
 }
 
 function parseDateRange(lines: string[]) {
   const joined = lines.join(" ");
-  const matches =
-    joined.match(
-      /(?:[A-Za-z]{3,9}\s+\d{4}|\d{4}|Present|Current)(?:\s*[-–to]+\s*(?:[A-Za-z]{3,9}\s+\d{4}|\d{4}|Present|Current))?/gi,
-    ) ?? [];
+  const extracted = extractDateRangeFromText(joined);
 
-  if (matches.length === 0) {
+  if (!extracted.matched) {
     return {
       startDate: "",
       endDate: "",
     };
   }
 
-  const firstRange = matches[0] ?? "";
-  const parts = firstRange.split(/\s*[-–to]+\s*/i).map((part) => part.trim());
+  return {
+    startDate: extracted.startDate,
+    endDate: extracted.endDate,
+  };
+}
+
+function parseTitleCompanyFromLine(line: string) {
+  const trimmed = line.trim();
+  let working = trimmed;
+  let startDate = "";
+  let endDate = "";
+
+  const dateFromLine = extractDateRangeFromText(working);
+  if (dateFromLine.matched) {
+    startDate = dateFromLine.startDate;
+    endDate = dateFromLine.endDate;
+    working = dateFromLine.remainder.trim();
+  }
+
+  if (/ at /i.test(working)) {
+    const [title, company] = working.split(/\s+at\s+/i);
+    return {
+      title: title.trim(),
+      company: company.trim(),
+      startDate,
+      endDate,
+    };
+  }
+
+  const pipeParts = working.split("|").map((part) => part.trim()).filter(Boolean);
+  if (pipeParts.length >= 2) {
+    return {
+      title: pipeParts[0],
+      company: pipeParts[1],
+      startDate,
+      endDate,
+    };
+  }
+
+  const dashMatch = working.match(/^(.+?)\s*(?:—|–)\s*(.+)$/u);
+  if (dashMatch) {
+    return {
+      title: dashMatch[1].trim(),
+      company: dashMatch[2].trim(),
+      startDate,
+      endDate,
+    };
+  }
+
+  const commaMatch = working.match(/^(.+?),\s*(.+)$/);
+  if (commaMatch && commaMatch[2].split(/\s+/).length <= 8) {
+    return {
+      title: commaMatch[1].trim(),
+      company: commaMatch[2].trim(),
+      startDate,
+      endDate,
+    };
+  }
 
   return {
-    startDate: parts[0] ?? "",
-    endDate: parts[1] ?? parts[0] ?? "",
+    title: working,
+    company: "",
+    startDate,
+    endDate,
+  };
+}
+
+function isExperienceJobHeader(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed || isPdfPageArtifact(trimmed) || /^[-*•]/.test(trimmed)) {
+    return false;
+  }
+
+  if (isDateRangeLine(trimmed) || trimmed.length > 160) {
+    return false;
+  }
+
+  if (
+    /^(Built|Led|Developed|Managed|Architected|Implemented|Collaborated|Supported|Created|Engineered|Participated|Resolved|Owned|Ensured|Assisted|Drove|Partnered)\s/i.test(
+      trimmed,
+    )
+  ) {
+    return false;
+  }
+
+  const dashMatch = trimmed.match(/^(.+?)\s*(?:—|–)\s*(.+)$/u);
+  if (dashMatch) {
+    const company = dashMatch[2].trim();
+    return company.split(/\s+/).length <= 8 && !isDateRangeLine(company);
+  }
+
+  if (/\s\|\s/.test(trimmed)) {
+    const parts = trimmed.split("|").map((part) => part.trim());
+    if (parts.length >= 2) {
+      const right = parts[1];
+      return !isDateRangeLine(right) && !/^\d{4}/.test(right);
+    }
+  }
+
+  if (/\s+at\s+/i.test(trimmed) && trimmed.split(/\s+/).length <= 12) {
+    return true;
+  }
+
+  const withoutDates = extractDateRangeFromText(trimmed).remainder;
+  const commaMatch = withoutDates.match(/^(.+?),\s*(.+)$/);
+  if (commaMatch) {
+    const companyPart = commaMatch[2].trim();
+    return (
+      companyPart.split(/\s+/).length <= 5 &&
+      !/using|with$/i.test(companyPart) &&
+      !isDateRangeLine(companyPart)
+    );
+  }
+
+  return false;
+}
+
+function isGarbageBullet(line: string) {
+  const trimmed = line.trim();
+  return (
+    !trimmed ||
+    isPdfPageArtifact(trimmed) ||
+    /^\d+\s+of\s+\d+/i.test(trimmed) ||
+    trimmed.length < 8
+  );
+}
+
+function mergeWrappedBulletLines(lines: string[]) {
+  const merged: string[] = [];
+
+  for (const line of lines) {
+    if (!merged.length) {
+      merged.push(line);
+      continue;
+    }
+
+    const previous = merged[merged.length - 1];
+    const previousComplete = /[.!?)]$/.test(previous) || previous.length < 45;
+    const startsNewEntry =
+      /^[-*•]/.test(line) || isExperienceJobHeader(line) || isDateRangeLine(line);
+
+    if (!previousComplete && !startsNewEntry && line.length > 10) {
+      merged[merged.length - 1] = `${previous} ${line}`.replace(/\s+/g, " ").trim();
+    } else {
+      merged.push(line);
+    }
+  }
+
+  return merged;
+}
+
+function splitExperienceLinesIntoJobs(lines: string[]) {
+  const jobs: string[][] = [];
+  let current: string[] = [];
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || isPdfPageArtifact(line)) {
+      continue;
+    }
+
+    if (isExperienceJobHeader(line) && current.length > 0) {
+      const hasContent =
+        current.some((entry) => entry.length > 40) ||
+        current.filter((entry) => isDateRangeLine(entry)).length > 0;
+
+      if (hasContent) {
+        jobs.push(current);
+        current = [line];
+        continue;
+      }
+    }
+
+    current.push(rawLine);
+  }
+
+  if (current.length) {
+    jobs.push(current);
+  }
+
+  return jobs;
+}
+
+function inferDatesFromText(lines: string[]) {
+  const years = [...lines.join(" ").matchAll(/\b(19|20)\d{2}\b/g)].map((match) => match[0]);
+  if (years.length >= 2) {
+    return { startDate: years[0], endDate: years[years.length - 1] };
+  }
+
+  if (years.length === 1) {
+    return { startDate: years[0], endDate: "Present" };
+  }
+
+  return { startDate: "", endDate: "" };
+}
+
+function sanitizeJobTitle(value: string) {
+  return value
+    .replace(/\s*(?:—|–|-)\s*$/, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function sanitizeCompanyName(value: string) {
+  const cleaned = extractDateRangeFromText(value).remainder.trim();
+  return cleaned.replace(/\s{2,}/g, " ").trim();
+}
+
+function isImportedPlaceholder(value: string) {
+  return /^imported\s+(role|experience|company)$/i.test(value.trim());
+}
+
+function isValidExperienceEntry(entry: ResumeContent["experiences"][number]) {
+  if (isImportedPlaceholder(entry.title) || isImportedPlaceholder(entry.company)) {
+    return false;
+  }
+
+  if (isDateRangeLine(entry.company)) {
+    return false;
+  }
+
+  if (entry.title.length < 3) {
+    return false;
+  }
+
+  const bullets = entry.bullets.filter((bullet) => !isGarbageBullet(bullet));
+  if (!bullets.length) {
+    return false;
+  }
+
+  return true;
+}
+
+export function repairImportedExperiences(experiences: ResumeContent["experiences"]) {
+  return experiences
+    .map((experience) => {
+      let title = experience.title.trim();
+      let company = experience.company.trim();
+      let startDate = normalizeDateValue(experience.startDate);
+      let endDate = normalizeDateValue(experience.endDate);
+
+      if (isDateRangeLine(company)) {
+        const dates = extractDateRangeFromText(company);
+        startDate = startDate || dates.startDate;
+        endDate = endDate || dates.endDate;
+      }
+
+      if (title.includes("—") || title.includes("–")) {
+        const parsed = parseTitleCompanyFromLine(title);
+        title = parsed.title || title;
+        company = company && !isDateRangeLine(company) ? company : parsed.company || company;
+        startDate = startDate || parsed.startDate;
+        endDate = endDate || parsed.endDate;
+      }
+
+      if (isDateRangeLine(company)) {
+        const dates = extractDateRangeFromText(company);
+        const parsed = parseTitleCompanyFromLine(title);
+        title = parsed.title || title;
+        company = parsed.company || company;
+        startDate = startDate || dates.startDate || parsed.startDate;
+        endDate = endDate || dates.endDate || parsed.endDate;
+      }
+
+      const titleDates = extractDateRangeFromText(title);
+      if (titleDates.matched) {
+        startDate = startDate || titleDates.startDate;
+        endDate = endDate || titleDates.endDate;
+        title = titleDates.remainder;
+      }
+
+      company = sanitizeCompanyName(company);
+      title = sanitizeJobTitle(title);
+
+      if (!company) {
+        const reparsed = parseTitleCompanyFromLine(title);
+        title = reparsed.title || title;
+        company = reparsed.company;
+        startDate = startDate || reparsed.startDate;
+        endDate = endDate || reparsed.endDate;
+      }
+
+      const inferred = inferDatesFromText([
+        title,
+        company,
+        experience.location,
+        ...experience.bullets,
+      ]);
+      startDate = startDate || inferred.startDate;
+      endDate = endDate || inferred.endDate;
+
+      const bullets = experience.bullets
+        .map((bullet) => bullet.trim())
+        .filter((bullet) => !isGarbageBullet(bullet));
+
+      return {
+        ...experience,
+        title: sanitizeJobTitle(title),
+        company: sanitizeCompanyName(company),
+        startDate: startDate || inferred.startDate || "Present",
+        endDate: endDate || inferred.endDate || startDate || "Present",
+        bullets,
+      };
+    })
+    .filter(isValidExperienceEntry);
+}
+
+function sanitizeImportedExperiences(experiences: ResumeContent["experiences"]) {
+  return repairImportedExperiences(experiences);
+}
+
+function parseExperienceBlock(block: string[], index: number) {
+  const merged = mergeWrappedBulletLines(
+    block.map((line) => line.trim()).filter((line) => line && !isPdfPageArtifact(line)),
+  );
+
+  let title = "";
+  let company = "";
+  let startDate = "";
+  let endDate = "";
+  let location = "";
+  const bullets: string[] = [];
+
+  for (let index = 0; index < merged.length; index += 1) {
+    const line = merged[index];
+
+    if (isGarbageBullet(line) && !isExperienceJobHeader(line) && !isDateRangeLine(line)) {
+      continue;
+    }
+
+    if (index < 3 && isExperienceJobHeader(line)) {
+      const parsed = parseTitleCompanyFromLine(line);
+      if (
+        parsed.company &&
+        !isDateRangeLine(parsed.company) &&
+        !/^\d{4}/.test(parsed.company)
+      ) {
+        title = parsed.title;
+        company = parsed.company;
+        startDate = startDate || parsed.startDate;
+        endDate = endDate || parsed.endDate;
+        continue;
+      }
+    }
+
+    if (index < 4 && isDateRangeLine(line)) {
+      const dates = extractDateRangeFromText(line);
+      startDate = dates.startDate || startDate;
+      endDate = dates.endDate || endDate;
+      continue;
+    }
+
+    if (
+      /^(remote|hybrid|onsite)$/i.test(line) ||
+      (/remote|hybrid|onsite/i.test(line) && line.includes(","))
+    ) {
+      location = line;
+      continue;
+    }
+
+    const bullet = line.replace(/^[-*•]\s*/, "").trim();
+    if (bullet.length > 15 && !isGarbageBullet(bullet)) {
+      bullets.push(bullet);
+    }
+  }
+
+  if (!title && merged[0]) {
+    const parsed = parseTitleCompanyFromLine(merged[0]);
+    title = parsed.title;
+    company = parsed.company;
+    startDate = startDate || parsed.startDate;
+    endDate = endDate || parsed.endDate;
+  }
+
+  const blockDates = parseDateRange(merged.slice(0, 4));
+  startDate = startDate || blockDates.startDate;
+  endDate = endDate || blockDates.endDate;
+
+  const inferred = inferDatesFromText(merged);
+  startDate = startDate || inferred.startDate;
+  endDate = endDate || inferred.endDate;
+
+  return {
+    id: `exp-${index + 1}`,
+    company: sanitizeCompanyName(company),
+    title: sanitizeJobTitle(title),
+    location,
+    startDate: startDate || inferred.startDate || "Present",
+    endDate: endDate || inferred.endDate || startDate || "Present",
+    bullets,
   };
 }
 
 function splitTitleAndCompany(primary: string, secondary: string) {
+  const primaryParsed = parseTitleCompanyFromLine(primary);
+
+  if (primaryParsed.company) {
+    return {
+      title: primaryParsed.title,
+      company: primaryParsed.company,
+      startDate: primaryParsed.startDate,
+      endDate: primaryParsed.endDate,
+    };
+  }
+
+  if (isDateRangeLine(secondary)) {
+    const dates = extractDateRangeFromText(secondary);
+    return {
+      title: primaryParsed.title,
+      company: primaryParsed.company,
+      startDate: dates.startDate || primaryParsed.startDate,
+      endDate: dates.endDate || primaryParsed.endDate,
+    };
+  }
+
   if (/ at /i.test(primary)) {
     const [title, company] = primary.split(/\s+at\s+/i);
     return {
       title: title.trim(),
       company: company.trim(),
+      startDate: primaryParsed.startDate,
+      endDate: primaryParsed.endDate,
     };
   }
 
@@ -248,59 +840,54 @@ function splitTitleAndCompany(primary: string, secondary: string) {
     return {
       title: primaryParts[0],
       company: primaryParts[1],
+      startDate: primaryParsed.startDate,
+      endDate: primaryParsed.endDate,
     };
   }
 
   if (secondary) {
+    const secondaryParsed = parseTitleCompanyFromLine(secondary);
     return {
-      title: primary,
-      company: secondary,
+      title: primaryParsed.title || secondaryParsed.title,
+      company: secondaryParsed.company || secondary,
+      startDate: primaryParsed.startDate || secondaryParsed.startDate,
+      endDate: primaryParsed.endDate || secondaryParsed.endDate,
     };
   }
 
   return {
-    title: primary,
-    company: "Imported Experience",
+    title: primaryParsed.title || primary,
+    company: primaryParsed.company || "Imported Experience",
+    startDate: primaryParsed.startDate,
+    endDate: primaryParsed.endDate,
   };
 }
 
 function parseExperienceSection(lines: string[], fallback: ResumeContent["experiences"]) {
-  const blocks = splitBlocks(lines);
+  const cleanLines = lines.filter((line) => !isPdfPageArtifact(line.trim()));
+
+  let blocks = splitBlocks(cleanLines);
+  if (blocks.length === 1 && blocks[0].length > 4) {
+    const jobBlocks = splitExperienceLinesIntoJobs(blocks[0]);
+    if (jobBlocks.length > 1) {
+      blocks = jobBlocks;
+    }
+  }
+
+  if (!blocks.length && cleanLines.length) {
+    blocks = splitExperienceLinesIntoJobs(cleanLines);
+  }
+
   if (!blocks.length) {
-    return fallback;
+    return sanitizeImportedExperiences(fallback);
   }
 
   const parsed = blocks
-    .map((block, index) => {
-      const bulletLines = block
-        .filter((line) => /^[-*]/.test(line))
-        .map((line) => line.replace(/^[-*]\s*/, "").trim())
-        .filter(Boolean);
-      const infoLines = block.filter((line) => !/^[-*]/.test(line));
-      const headingOne = infoLines[0] ?? "";
-      const headingTwo = infoLines[1] ?? "";
-      const { title, company } = splitTitleAndCompany(headingOne, headingTwo);
-      const { startDate, endDate } = parseDateRange(infoLines);
-      const location =
-        infoLines.find((line) => /remote|hybrid|onsite|,/.test(line) && !/\d{4}/.test(line)) ?? "";
-      const bullets =
-        bulletLines.length > 0
-          ? bulletLines
-          : infoLines.slice(2).filter((line) => line.length > 12);
+    .map((block, index) => parseExperienceBlock(block, index))
+    .filter(isValidExperienceEntry);
 
-      return {
-        id: `exp-${index + 1}`,
-        company: company || "Imported Company",
-        title: title || "Imported Role",
-        location,
-        startDate: startDate || "Unknown",
-        endDate: endDate || "Unknown",
-        bullets: bullets.length ? bullets : ["Imported from uploaded resume."],
-      };
-    })
-    .filter((entry) => entry.title && entry.company);
-
-  return parsed.length ? parsed : fallback;
+  const sanitized = sanitizeImportedExperiences(parsed);
+  return sanitized.length ? sanitized : sanitizeImportedExperiences(fallback);
 }
 
 function parseEducationSection(lines: string[], fallback: ResumeContent["education"]) {
@@ -320,7 +907,8 @@ function parseEducationSection(lines: string[], fallback: ResumeContent["educati
     const graduationDate =
       parseDateRange(infoLines).endDate ||
       infoLines.find((line) => /\b(19|20)\d{2}\b/.test(line)) ||
-      "Unknown";
+      inferDatesFromText(infoLines).endDate ||
+      "Present";
     const location =
       infoLines.find((line) => /remote|hybrid|onsite|,/.test(line) && !/\d{4}/.test(line)) ?? "";
 
@@ -387,20 +975,22 @@ function parseProjectSection(lines: string[]) {
   );
 }
 
-export function parseResumeTextToContent(
-  text: string,
-  fallbackResume: ResumeContent,
-  titleHint = "Imported Resume",
-) {
+export function parseResumeTextToContent(text: string, fallbackResume: ResumeContent) {
   const normalized = normalizeText(text);
   const { header, sections } = splitResumeSections(normalized);
   const urls = extractUrls(normalized);
-  const linkedin = urls.find((url) => /linkedin\.com/i.test(url)) ?? fallbackResume.personal.linkedin;
-  const github =
-    urls.find((url) => /github\.com/i.test(url)) ?? fallbackResume.personal.github;
-  const portfolio =
-    urls.find((url) => !/linkedin\.com/i.test(url) && !/github\.com/i.test(url)) ??
-    fallbackResume.personal.portfolio;
+  const linkedin = coalescePersonalUrl(
+    urls.find((url) => /linkedin\.com/i.test(url)),
+    fallbackResume.personal.linkedin,
+  );
+  const github = coalescePersonalUrl(
+    urls.find((url) => /github\.com/i.test(url)),
+    fallbackResume.personal.github,
+  );
+  const portfolio = coalescePersonalUrl(
+    urls.find((url) => !/linkedin\.com/i.test(url) && !/github\.com/i.test(url)),
+    fallbackResume.personal.portfolio,
+  );
   const skillGroups = splitSkillValues(sections.skills);
   const summary = compactLines(sections.summary).join(" ").trim();
   const headerLines = compactLines(header);
@@ -410,7 +1000,7 @@ export function parseResumeTextToContent(
       : fallbackResume.personal.headline;
 
   const imported = normalizeResumeContent({
-    title: fallbackResume.title === "Base Resume" ? titleHint : fallbackResume.title,
+    title: fallbackResume.title,
     personal: {
       fullName: firstMeaningfulLine(header) ?? fallbackResume.personal.fullName,
       headline,
@@ -427,10 +1017,22 @@ export function parseResumeTextToContent(
         : compactLines(header).slice(1, 4).join(" ").trim() || fallbackResume.summary,
     skillGroups:
       skillGroups.length > 0 ? skillGroups : fallbackResume.skillGroups,
-    experiences: parseExperienceSection(sections.experience, fallbackResume.experiences),
+    experiences: parseExperienceSection(sections.experience, fallbackResume.experiences).map(
+      (experience) => ({
+        ...experience,
+        bullets: stripInlineCertificationBullets(experience.bullets),
+      }),
+    ),
     education: parseEducationSection(sections.education, fallbackResume.education),
-    projects: parseProjectSection(sections.projects),
-    certifications: parseCertificationSection(sections.certifications),
+    projects: parseProjectSection(sections.projects).map((project) => ({
+      ...project,
+      bullets: stripInlineCertificationBullets(project.bullets),
+    })),
+    certifications: collectCertifications(
+      normalized,
+      sections,
+      fallbackResume.certifications,
+    ),
   });
 
   return imported;

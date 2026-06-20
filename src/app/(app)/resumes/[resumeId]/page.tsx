@@ -10,7 +10,7 @@ export default async function ResumePage({
   searchParams,
 }: {
   params: Promise<{ resumeId: string }>;
-  searchParams: Promise<{ aiError?: string; aiSummary?: string; saved?: string }>;
+  searchParams: Promise<{ aiError?: string; aiSections?: string; aiSummary?: string; saved?: string }>;
 }) {
   const { resumeId } = await params;
   const query = await searchParams;
@@ -31,6 +31,7 @@ export default async function ResumePage({
         resume={workspace.resume}
         versions={workspace.versions}
         aiError={query.aiError}
+        aiSections={query.aiSections === "1"}
         aiSummary={query.aiSummary === "1"}
         saved={query.saved === "1"}
       />

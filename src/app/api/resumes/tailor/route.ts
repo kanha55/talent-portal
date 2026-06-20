@@ -74,7 +74,7 @@ export async function POST(request: Request) {
         userId: user.id,
         baseResumeId: resume.id,
         targetJobId: targetJob.id,
-        title: `${targetJob.role} Tailored Resume`,
+        title: resume.content.title,
         resume: tailored.resume,
         changeSummary: tailored.changeSummary,
         atsReportId: reportId,

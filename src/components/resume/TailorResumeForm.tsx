@@ -38,7 +38,8 @@ export function TailorResumeForm({ resumeId }: { resumeId: string }) {
         <p className="text-xs font-semibold uppercase tracking-wide text-indigo-600">AI tailoring</p>
         <h2 className="mt-1 text-xl font-bold text-zinc-900">Target job</h2>
         <p className="mt-2 text-sm leading-6 text-zinc-500">
-          Paste the job description or URL. Company and role are auto-extracted when left blank.
+          Paste the job description or LinkedIn URL. Company and role are auto-extracted when left blank.
+          LinkedIn URLs usually work, but pasting the job description text gives the most reliable tailoring.
         </p>
       </div>
       <TailorStatusMessage />

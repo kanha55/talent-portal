@@ -17,4 +17,19 @@ describe("parseJobDescription", () => {
     expect(parsed.role).toBe("Backend Engineer (NodeJS)");
     expect(parsed.company).toBe("Habyt");
   });
+
+  it("extracts company from LinkedIn page title when company hint is empty", () => {
+    const parsed = parseJobDescription({
+      company: "",
+      role: "",
+      sourceUrl: "https://www.linkedin.com/jobs/view/4416379770/",
+      description:
+        "We are looking for a skilled Full Stack Developer with experience in AWS, Ruby on Rails, React.js, JavaScript, MySQL, and Elasticsearch.",
+      pageTitle: "Programmers.io hiring Senior Ruby on Rails Developer in India | LinkedIn",
+      companyHint: "",
+    });
+
+    expect(parsed.role).toBe("Senior Ruby on Rails Developer");
+    expect(parsed.company).toBe("Programmers.io");
+  });
 });

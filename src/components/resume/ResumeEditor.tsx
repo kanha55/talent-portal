@@ -1,4 +1,4 @@
-import { generateResumeSummaryAction, updateResumeAction } from "@/app/actions";
+import { generateResumeSectionsAction, updateResumeAction } from "@/app/actions";
 import { AiFeedbackBanner } from "@/components/resume/AiFeedbackBanner";
 import { ResumeImportForm } from "@/components/resume/ResumeImportForm";
 import { SaveSuccessBanner } from "@/components/resume/SaveSuccessBanner";
@@ -24,12 +24,14 @@ export function ResumeEditor({
   resume,
   versions,
   aiError,
+  aiSections,
   aiSummary,
   saved,
 }: {
   resume: BaseResume;
   versions: TailoredResumeVersion[];
   aiError?: string;
+  aiSections?: boolean;
   aiSummary?: boolean;
   saved?: boolean;
 }) {
@@ -37,7 +39,7 @@ export function ResumeEditor({
     <div className="grid gap-6 xl:grid-cols-[1.3fr_0.9fr]">
       <div className="space-y-6">
         <SaveSuccessBanner saved={saved} />
-        <AiFeedbackBanner aiError={aiError} aiSummary={aiSummary} />
+        <AiFeedbackBanner aiError={aiError} aiSections={aiSections} aiSummary={aiSummary} />
         <ResumeImportForm resumeId={resume.id} />
 
         <form
@@ -56,13 +58,15 @@ export function ResumeEditor({
                 {resume.content.title}
               </h1>
               <p className="mt-2 text-sm text-zinc-500">
-                Edit below and click <strong>Save resume</strong> to keep your changes.
+                Edit below and click <strong>Save resume</strong> to keep your changes.{" "}
+                <strong>Generate with AI</strong> fills summary, experience, education, skills, and
+                certifications from your profile.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="submit"
-                formAction={generateResumeSummaryAction}
+                formAction={generateResumeSectionsAction}
                 className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100"
               >
                 Generate with AI

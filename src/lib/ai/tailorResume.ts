@@ -1,6 +1,8 @@
-import { generateProfessionalSummary } from "@/lib/ai/generateProfessionalSummary";
-import { callOpenAiJsonChat } from "@/lib/ai/openaiClient";
-import { buildTailorResumePrompt } from "@/lib/ai/prompts/tailorResume";
+import {
+  formatTailoringMetaNotes,
+  generateResumeSections,
+  type GeneratedResumeSections,
+} from "@/lib/ai/generateResumeSections";
 import {
   extractTechKeywords,
   isArtifactSkill,
@@ -229,6 +231,15 @@ function categorizeSkills(skills: string[]) {
   return groups;
 }
 
+function normalizeTailoredSkillGroups(groups: SkillGroup[]) {
+  return groups
+    .filter((group) => group.items?.length)
+    .map((group) => ({
+      category: group.category,
+      items: dedupeStringsCaseInsensitive(group.items.filter(Boolean)).slice(0, 20),
+    }));
+}
+
 function rebuildSkillGroupsForJd(
   baseResume: ResumeContent,
   targetJob: TargetJob,
@@ -257,16 +268,20 @@ function polishGeneralResume(
   baseResume: ResumeContent,
   targetJob: TargetJob,
 ): ResumeContent {
-  const role = resolveTargetRole(baseResume, targetJob);
+  const tailoredSkillCount = flattenSkillItems(resume).length;
+  const skillGroups =
+    tailoredSkillCount >= 6
+      ? normalizeTailoredSkillGroups(resume.skillGroups)
+      : rebuildSkillGroupsForJd(baseResume, targetJob, resume.skillGroups);
 
   return {
     ...resume,
     summary: stripEmployerReferences(resume.summary, targetJob),
     personal: {
       ...resume.personal,
-      headline: role,
+      headline: resume.personal.headline || resolveTargetRole(baseResume, targetJob),
     },
-    skillGroups: rebuildSkillGroupsForJd(baseResume, targetJob, resume.skillGroups),
+    skillGroups,
     experiences: resume.experiences.map((experience) => ({
       ...experience,
       bullets: experience.bullets
@@ -314,7 +329,7 @@ function finalizeTailoredResume(
   targetJob: TargetJob,
   partial: Partial<ResumeContent>,
 ): ResumeContent {
-  const role = resolveTargetRole(baseResume, targetJob);
+  const role = partial.personal?.headline || resolveTargetRole(baseResume, targetJob);
   const merged = normalizeResumeContent(
     sanitizeResumeFields({
       ...baseResume,
@@ -359,22 +374,46 @@ function heuristicTailor(baseResume: ResumeContent, targetJob: TargetJob): Tailo
   };
 }
 
-function mergeResponseIntoResume(
+const DEFAULT_SECTIONS_CHANGE_SUMMARY = [
+  "Generated a professional summary with AI from the full candidate profile.",
+  "Rewrote work experience bullets in reverse-chronological order with action-oriented impact.",
+  "Grouped keyword-rich skills and polished education highlights.",
+];
+
+function mergeSkillGroupsFromLlm(
   baseResume: ResumeContent,
-  targetJob: TargetJob,
-  parsed: {
-    summary?: string;
-    headline?: string;
-    skillGroups?: SkillGroup[];
-    experiences?: { id: string; bullets: string[] }[];
-    changeSummary?: string[];
-  },
-): TailorResult {
+  targetJob: TargetJob | undefined,
+  parsedGroups: SkillGroup[] | undefined,
+) {
+  const normalizedGroups = parsedGroups
+    ?.filter((group) => group.items?.length)
+    .map((group) => ({
+      category: group.category,
+      items: dedupeStringsCaseInsensitive(group.items.filter(Boolean)),
+    }));
+
+  if (!normalizedGroups?.length) {
+    return targetJob
+      ? rebuildSkillGroupsForJd(baseResume, targetJob, prioritizeSkillGroups(baseResume, targetJob))
+      : baseResume.skillGroups;
+  }
+
+  if (targetJob) {
+    return normalizeTailoredSkillGroups(normalizedGroups);
+  }
+
+  return normalizedGroups;
+}
+
+function mergeExperiencesFromLlm(
+  baseResume: ResumeContent,
+  parsedExperiences: GeneratedResumeSections["experiences"],
+) {
   const experiencesById = new Map(
-    parsed.experiences?.map((entry) => [entry.id, entry.bullets]) ?? [],
+    parsedExperiences?.map((entry) => [entry.id, entry.bullets]) ?? [],
   );
 
-  const mergedExperiences = baseResume.experiences
+  return baseResume.experiences
     .map((experience) => ({
       ...experience,
       bullets: experiencesById.get(experience.id)?.filter(Boolean).length
@@ -382,51 +421,128 @@ function mergeResponseIntoResume(
         : experience.bullets,
     }))
     .sort((a, b) => experienceSortScore(b) - experienceSortScore(a));
+}
 
-  const skillGroups =
-    parsed.skillGroups?.filter((group) => group.items?.length).length
-      ? rebuildSkillGroupsForJd(
-          baseResume,
-          targetJob,
-          parsed.skillGroups.map((group) => ({
-            category: group.category,
-            items: dedupeStringsCaseInsensitive(group.items.filter(Boolean)),
-          })),
-        )
-      : rebuildSkillGroupsForJd(baseResume, targetJob, prioritizeSkillGroups(baseResume, targetJob));
+function mergeEducationFromLlm(
+  baseResume: ResumeContent,
+  parsedEducation: GeneratedResumeSections["education"],
+) {
+  const educationById = new Map(
+    parsedEducation?.map((entry) => [entry.id, entry.highlights]) ?? [],
+  );
+
+  return baseResume.education.map((entry) => ({
+    ...entry,
+    highlights: educationById.get(entry.id)?.filter(Boolean).length
+      ? (educationById.get(entry.id) as string[])
+      : entry.highlights,
+  }));
+}
+
+function mergeCertificationsFromLlm(
+  baseResume: ResumeContent,
+  parsedCertifications: GeneratedResumeSections["certifications"],
+) {
+  if (!baseResume.certifications.length) {
+    return [];
+  }
+
+  const certificationsById = new Map(
+    parsedCertifications?.map((entry) => [entry.id, entry]) ?? [],
+  );
+
+  return baseResume.certifications.map((certification) => {
+    const parsed = certificationsById.get(certification.id);
+    if (!parsed) {
+      return certification;
+    }
+
+    return {
+      ...certification,
+      name: parsed.name?.trim() || certification.name,
+      issuer: parsed.issuer?.trim() || certification.issuer,
+      date: parsed.date?.trim() || certification.date,
+    };
+  });
+}
+
+export function applyGeneratedResumeSections(
+  baseResume: ResumeContent,
+  parsed: GeneratedResumeSections,
+  targetJob?: TargetJob,
+): { resume: ResumeContent; changeSummary: string[] } {
+  const summaryText = parsed.summary?.trim() || baseResume.summary;
+  const summary = targetJob
+    ? stripEmployerReferences(summaryText, targetJob)
+    : summaryText;
+
+  const headline = targetJob
+    ? resolveTargetRole(baseResume, targetJob)
+    : parsed.headline?.trim() || baseResume.personal.headline;
+
+  const partial: Partial<ResumeContent> = {
+    summary,
+    personal: {
+      ...baseResume.personal,
+      headline,
+    },
+    skillGroups: mergeSkillGroupsFromLlm(baseResume, targetJob, parsed.skillGroups),
+    experiences: mergeExperiencesFromLlm(baseResume, parsed.experiences).map((experience) => ({
+      ...experience,
+      bullets: targetJob
+        ? experience.bullets
+            .map((bullet) => stripEmployerReferences(bullet, targetJob))
+            .filter(Boolean)
+        : experience.bullets,
+    })),
+    education: mergeEducationFromLlm(baseResume, parsed.education),
+    certifications: mergeCertificationsFromLlm(baseResume, parsed.certifications),
+    projects: [],
+  };
+
+  const changeSummary = [
+    ...(parsed.changeSummary?.filter(Boolean).length
+      ? parsed.changeSummary.filter(Boolean)
+      : [...DEFAULT_SECTIONS_CHANGE_SUMMARY]),
+    ...formatTailoringMetaNotes(parsed.meta),
+  ];
+
+  if (targetJob) {
+    return {
+      resume: finalizeTailoredResume(baseResume, targetJob, partial),
+      changeSummary,
+    };
+  }
 
   return {
-    resume: finalizeTailoredResume(baseResume, targetJob, {
-      summary: stripEmployerReferences(parsed.summary?.trim() || baseResume.summary, targetJob),
-      personal: {
-        ...baseResume.personal,
-        headline: resolveTargetRole(baseResume, targetJob),
-      },
-      skillGroups,
-      experiences: mergedExperiences,
-      projects: [],
-    }),
-    changeSummary:
-      parsed.changeSummary?.filter(Boolean).length ? parsed.changeSummary.filter(Boolean) : [],
-    usedModel: "openai-compatible",
+    resume: normalizeResumeContent(
+      sanitizeResumeFields({
+        ...baseResume,
+        ...partial,
+        title: baseResume.title,
+        personal: {
+          ...baseResume.personal,
+          ...partial.personal,
+        },
+      }),
+    ),
+    changeSummary,
   };
 }
 
-type TailorLlmPayload = {
-  summary?: string;
-  headline?: string;
-  skillGroups?: SkillGroup[];
-  experiences?: { id: string; bullets: string[] }[];
-  changeSummary?: string[];
-};
+function mergeResponseIntoResume(
+  baseResume: ResumeContent,
+  targetJob: TargetJob,
+  parsed: GeneratedResumeSections,
+  usedModel: string,
+): TailorResult {
+  const { resume, changeSummary } = applyGeneratedResumeSections(baseResume, parsed, targetJob);
 
-async function callOpenAiCompatible(baseResume: ResumeContent, targetJob: TargetJob) {
-  return callOpenAiJsonChat<TailorLlmPayload>({
-    system:
-      "You tailor resumes for ATS systems while preserving factual accuracy and returning JSON.",
-    user: buildTailorResumePrompt(baseResume, targetJob),
-    temperature: 0.3,
-  });
+  return {
+    resume,
+    changeSummary,
+    usedModel,
+  };
 }
 
 function formatAiWarning(message: string) {
@@ -439,64 +555,15 @@ function addUniqueChangeSummaryItem(items: string[], item: string) {
   }
 }
 
-function wantsFullTailorLlm() {
-  return process.env.OPENAI_FULL_TAILOR === "true";
-}
-
 export async function tailorResume(baseResume: ResumeContent, targetJob: TargetJob) {
   const normalizedBase = normalizeResumeContent(baseResume);
 
-  const applyLlmSummary = async (result: TailorResult): Promise<TailorResult> => {
-    const llmSummary = await generateProfessionalSummary(normalizedBase, targetJob);
-    if (llmSummary.summary) {
-      result.resume.summary = stripEmployerReferences(llmSummary.summary, targetJob);
-      result.usedModel = llmSummary.model ?? result.usedModel;
-      if (!result.changeSummary.some((item) => /professional summary/i.test(item))) {
-        result.changeSummary.unshift(
-          "Generated a 2-3 line professional summary with AI from the full candidate profile.",
-        );
-      }
-      return result;
-    }
-
-    if (llmSummary.error) {
-      addUniqueChangeSummaryItem(result.changeSummary, formatAiWarning(llmSummary.error));
-      result.usedModel = "heuristic-fallback";
-    }
-
-    return result;
-  };
-
-  if (!wantsFullTailorLlm()) {
-    return applyLlmSummary(heuristicTailor(normalizedBase, targetJob));
+  const llmResult = await generateResumeSections(normalizedBase, targetJob);
+  if (llmResult.ok) {
+    return mergeResponseIntoResume(normalizedBase, targetJob, llmResult.data, llmResult.model);
   }
 
-  const llmResult = await callOpenAiCompatible(normalizedBase, targetJob);
-  if (!llmResult.ok) {
-    const heuristic = heuristicTailor(normalizedBase, targetJob);
-    addUniqueChangeSummaryItem(heuristic.changeSummary, formatAiWarning(llmResult.error));
-    return applyLlmSummary(heuristic);
-  }
-
-  const merged = mergeResponseIntoResume(normalizedBase, targetJob, llmResult.data);
-  merged.usedModel = llmResult.model;
-  if (!merged.changeSummary.length) {
-    merged.changeSummary = heuristicTailor(normalizedBase, targetJob).changeSummary;
-  }
-
-  const tailoredSummary = merged.resume.summary.trim();
-  const baseSummary = normalizedBase.summary.trim();
-  if (
-    tailoredSummary &&
-    tailoredSummary !== baseSummary &&
-    tailoredSummary.length >= 20 &&
-    !merged.changeSummary.some((item) => /professional summary/i.test(item))
-  ) {
-    merged.changeSummary.unshift(
-      "Generated a 2-3 line professional summary with AI from the full candidate profile.",
-    );
-    return merged;
-  }
-
-  return applyLlmSummary(merged);
+  const heuristic = heuristicTailor(normalizedBase, targetJob);
+  addUniqueChangeSummaryItem(heuristic.changeSummary, formatAiWarning(llmResult.error));
+  return heuristic;
 }

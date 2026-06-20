@@ -23,6 +23,31 @@ export function sanitizePersonalEmail(value: string, fallback = "") {
   return `${localPart}@example.com`;
 }
 
+const PLACEHOLDER_PERSONAL_URL_PATTERNS = [
+  /your-profile/i,
+  /your-handle/i,
+  /linkedin\.com\/in\/your\b/i,
+  /github\.com\/your-handle/i,
+];
+
+export function isPlaceholderPersonalUrl(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return PLACEHOLDER_PERSONAL_URL_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+export function sanitizePersonalUrl(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed || isPlaceholderPersonalUrl(trimmed)) {
+    return "";
+  }
+
+  return trimmed;
+}
+
 const personalDetailsSchema = z.object({
   fullName: z.string().trim().min(2, "Full name is required."),
   headline: z.string().trim().optional().default(""),
@@ -197,6 +222,9 @@ export function normalizeResumeContent(
     String(personal.email ?? ""),
     options?.fallbackEmail ?? "",
   );
+  personal.linkedin = sanitizePersonalUrl(String(personal.linkedin ?? ""));
+  personal.github = sanitizePersonalUrl(String(personal.github ?? ""));
+  personal.portfolio = sanitizePersonalUrl(String(personal.portfolio ?? ""));
 
   content.personal = personal as ResumeContent["personal"];
 
@@ -458,8 +486,8 @@ export function createEmptyResume(userId: string, email: string, name: string): 
         email,
         phone: "+1 (555) 010-0101",
         location: "Remote",
-        linkedin: "linkedin.com/in/your-profile",
-        github: "github.com/your-handle",
+        linkedin: "",
+        github: "",
         portfolio: "",
       },
       summary:

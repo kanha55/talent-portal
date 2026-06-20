@@ -150,6 +150,9 @@ export function extractJobPostingBody(plainText: string) {
   const cleaned = cleanJobDescriptionText(plainText);
 
   const patterns = [
+    /Job (?:Overview|Description):\s*([\s\S]*?)(?=Seniority level|Employment type|Similar Searches|Show fewer jobs|Must-Have Skills|Key Skills Required)/i,
+    /Key Skills Required:\s*([\s\S]*?)(?=Requirements:|Must-Have Skills|Seniority level|Employment type)/i,
+    /Must-Have Skills\s*([\s\S]*?)(?=Seniority level|Employment type|Industries|Similar Searches)/i,
     /Report this job\s+([\s\S]*?)(?:Show more|Show less|Seniority level|Similar jobs|People also viewed)/i,
     /We(?:'re| are) looking[\s\S]*?(?=Similar jobs|Show more jobs|People also viewed|Seniority level)/i,
     /About (?:the role|Reserv|[\w\s]+)\s+([\s\S]*?)(?=Show more|Seniority level|What you(?:'ll| will))/i,

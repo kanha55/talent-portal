@@ -49,6 +49,51 @@ export function extractResponsibilities(description: string) {
   return unique(sentences.filter(Boolean)).slice(0, 8);
 }
 
+function inferCompanyFromPageTitle(pageTitle?: string) {
+  if (!pageTitle?.trim()) {
+    return "";
+  }
+
+  const hiringMatch = pageTitle.trim().match(/^([A-Za-z0-9][A-Za-z0-9.\-& ]{2,50})\s+hiring\s+/i);
+  if (hiringMatch?.[1] && !/linkedin/i.test(hiringMatch[1])) {
+    return hiringMatch[1].trim();
+  }
+
+  return "";
+}
+
+function inferCompanyFromDescription(description: string, role: string) {
+  const rolePrefix = role.trim().split(/\s+/).slice(0, 4).join(" ");
+  if (rolePrefix.length >= 4) {
+    const escaped = escapeRegExp(rolePrefix);
+    const match = description.match(
+      new RegExp(`${escaped}[\\s\\n]+([A-Za-z0-9][A-Za-z0-9.\\-& ]{2,50})[\\s\\n]+India`, "i"),
+    );
+    if (
+      match?.[1] &&
+      !/linkedin|learning|jobs|people|developer|engineer|trainee/i.test(match[1])
+    ) {
+      return match[1].trim();
+    }
+  }
+
+  const companyLine = description.match(
+    /\n([A-Za-z0-9][A-Za-z0-9.\-& ]{2,50})\nIndia\n(?:\d+ days ago|Over \d+ applicants)/i,
+  );
+  if (
+    companyLine?.[1] &&
+    !/linkedin|learning|jobs|people|developer|engineer/i.test(companyLine[1])
+  ) {
+    return companyLine[1].trim();
+  }
+
+  return "";
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function inferCompanyFromUrl(sourceUrl?: string) {
   if (!sourceUrl) {
     return "";
@@ -70,10 +115,6 @@ function inferCompanyFromUrl(sourceUrl?: string) {
   } catch {
     return "";
   }
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export function cleanJobRole(role: string, companyHint?: string) {
@@ -157,17 +198,19 @@ export function parseJobDescription(input: {
   const description = cleanJobDescriptionText(input.description.trim());
   const keywords = extractKeywords(description);
   const responsibilities = extractResponsibilities(description);
-  const company =
-    input.company.trim() ||
-    input.companyHint?.trim() ||
-    inferCompanyFromUrl(input.sourceUrl) ||
-    "Target Company";
 
   const inferredRole =
     input.role.trim() ||
     inferRoleFromDescription(description, input.pageTitle, input.companyHint) ||
-    inferRoleFromDescription(description, input.pageTitle, company) ||
     "Target Role";
+
+  const company =
+    input.company.trim() ||
+    input.companyHint?.trim() ||
+    inferCompanyFromPageTitle(input.pageTitle) ||
+    inferCompanyFromDescription(description, inferredRole) ||
+    inferCompanyFromUrl(input.sourceUrl) ||
+    "Target Company";
 
   let role = cleanJobRole(
     inferredRole,

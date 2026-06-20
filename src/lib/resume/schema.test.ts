@@ -8,6 +8,7 @@ import {
   normalizeResumeContent,
   resumeContentFromFormData,
   sanitizePersonalEmail,
+  sanitizePersonalUrl,
 } from "@/lib/resume/schema";
 import { flattenSkillItems } from "@/lib/resume/sectionContent";
 
@@ -53,5 +54,22 @@ describe("resumeContentFromFormData", () => {
 
     expect(normalized.personal.email).toBe("valid@example.com");
     expect(sanitizePersonalEmail("kk@kk")).toBe("kk@example.com");
+  });
+
+  it("removes placeholder linkedin and github urls during normalization", () => {
+    const normalized = normalizeResumeContent({
+      ...createEmptyResume("user-1", "valid@example.com", "Test User").content,
+      personal: {
+        ...createEmptyResume("user-1", "valid@example.com", "Test User").content.personal,
+        linkedin: "linkedin.com/in/your-profile",
+        github: "github.com/your-handle",
+      },
+    });
+
+    expect(normalized.personal.linkedin).toBe("");
+    expect(normalized.personal.github).toBe("");
+    expect(sanitizePersonalUrl("https://www.linkedin.com/in/kanhaiya-dubey/")).toBe(
+      "https://www.linkedin.com/in/kanhaiya-dubey/",
+    );
   });
 });

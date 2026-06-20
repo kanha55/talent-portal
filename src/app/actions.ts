@@ -6,8 +6,8 @@ import { redirect } from "next/navigation";
 import { signInWithEmail, signOut, signUpWithEmail } from "@/lib/auth";
 import { requireUser } from "@/lib/auth";
 import { resolveJobDescriptionInput } from "@/lib/jobs/fetchJobDescription";
-import { generateProfessionalSummary } from "@/lib/ai/generateProfessionalSummary";
-import { tailorResume } from "@/lib/ai/tailorResume";
+import { generateResumeSections } from "@/lib/ai/generateResumeSections";
+import { applyGeneratedResumeSections, tailorResume } from "@/lib/ai/tailorResume";
 import { extractTextFromResumeFile, parseResumeTextToContent } from "@/lib/resume/importResume";
 import { parseJobDescription } from "@/lib/jobs/parseJobDescription";
 import { generateAtsReport } from "@/lib/resume/atsChecks";
@@ -71,11 +71,7 @@ export async function importResumeAction(formData: FormData) {
   }
 
   const extractedText = await extractTextFromResumeFile(file);
-  const importedContent = parseResumeTextToContent(
-    extractedText,
-    resume.content,
-    file.name.replace(/\.[^.]+$/, "") || "Imported Resume",
-  );
+  const importedContent = parseResumeTextToContent(extractedText, resume.content);
 
   await updateResume(user.id, resumeId, importedContent);
   revalidatePath(`/resumes/${resumeId}`);
@@ -83,7 +79,7 @@ export async function importResumeAction(formData: FormData) {
   redirect(`/resumes/${resumeId}`);
 }
 
-export async function generateResumeSummaryAction(formData: FormData) {
+export async function generateResumeSectionsAction(formData: FormData) {
   const user = await requireUser();
   const resumeId = String(formData.get("resumeId") ?? "");
   const resume = await getResumeById(user.id, resumeId);
@@ -91,22 +87,20 @@ export async function generateResumeSummaryAction(formData: FormData) {
     throw new Error("Resume not found.");
   }
 
-  const result = await generateProfessionalSummary(
-    normalizeResumeContent(resume.content, { fallbackEmail: user.email }),
-  );
-  if (!result.summary) {
-    const message = result.error ?? "Could not generate summary with AI.";
+  const normalized = normalizeResumeContent(resume.content, { fallbackEmail: user.email });
+  const result = await generateResumeSections(normalized);
+  if (!result.ok) {
+    const message = result.error ?? "Could not generate resume sections with AI.";
     redirect(`/resumes/${resumeId}?aiError=${encodeURIComponent(message)}`);
   }
 
-  await updateResume(user.id, resumeId, {
-    ...resume.content,
-    summary: result.summary,
-  });
+  const { resume: updatedContent } = applyGeneratedResumeSections(normalized, result.data);
+
+  await updateResume(user.id, resumeId, updatedContent);
 
   revalidatePath(`/resumes/${resumeId}`);
   revalidatePath("/dashboard");
-  redirect(`/resumes/${resumeId}?aiSummary=1`);
+  redirect(`/resumes/${resumeId}?aiSections=1`);
 }
 
 export async function tailorResumeAction(formData: FormData) {
@@ -161,7 +155,7 @@ export async function tailorResumeAction(formData: FormData) {
         userId: user.id,
         baseResumeId: resume.id,
         targetJobId: targetJob.id,
-        title: `${targetJob.role} Tailored Resume`,
+        title: resume.content.title,
         resume: tailored.resume,
         changeSummary: tailored.changeSummary,
         atsReportId: reportId,
