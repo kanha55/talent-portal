@@ -1,9 +1,6 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import mammoth from "mammoth";
-import { PDFParse } from "pdf-parse";
-
 import {
   dedupeStringsCaseInsensitive,
   normalizeResumeContent,
@@ -43,10 +40,6 @@ const sectionAliases = new Map<string, keyof ParsedSections>([
   ["projects", "projects"],
   ["project experience", "projects"],
 ]);
-
-const pdfWorkerUrl = pathToFileURL(
-  path.join(process.cwd(), "node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs"),
-).toString();
 
 type ParsedSections = {
   summary: string[];
@@ -1038,22 +1031,42 @@ export function parseResumeTextToContent(text: string, fallbackResume: ResumeCon
   return imported;
 }
 
+async function ensureDomMatrixPolyfill() {
+  if (typeof globalThis.DOMMatrix !== "undefined") {
+    return;
+  }
+
+  const { default: DOMMatrixCtor } = await import("@thednp/dommatrix");
+  globalThis.DOMMatrix = DOMMatrixCtor as typeof globalThis.DOMMatrix;
+}
+
+async function extractPdfText(buffer: Buffer) {
+  await ensureDomMatrixPolyfill();
+  const { PDFParse } = await import("pdf-parse");
+  const pdfWorkerUrl = pathToFileURL(
+    path.join(process.cwd(), "node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs"),
+  ).toString();
+
+  PDFParse.setWorker(pdfWorkerUrl);
+  const parser = new PDFParse({ data: buffer });
+  try {
+    const parsed = await parser.getText({ pageJoiner: "" });
+    return normalizeText(parsed.text);
+  } finally {
+    await parser.destroy();
+  }
+}
+
 export async function extractTextFromResumeFile(file: File) {
   const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
   const buffer = Buffer.from(await file.arrayBuffer());
 
   if (extension === "pdf") {
-    PDFParse.setWorker(pdfWorkerUrl);
-    const parser = new PDFParse({ data: buffer });
-    try {
-      const parsed = await parser.getText({ pageJoiner: "" });
-      return normalizeText(parsed.text);
-    } finally {
-      await parser.destroy();
-    }
+    return await extractPdfText(buffer);
   }
 
   if (extension === "docx") {
+    const mammoth = (await import("mammoth")).default;
     const parsed = await mammoth.extractRawText({ buffer });
     return normalizeText(parsed.value);
   }
