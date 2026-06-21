@@ -1,4 +1,4 @@
-import { Agent, CursorAgentError } from "@cursor/sdk";
+import type { AgentOptions } from "@cursor/sdk";
 
 type OpenAiErrorPayload = {
   error?: {
@@ -14,12 +14,30 @@ export type LlmChatJsonResult<T> =
   | { ok: true; data: T; model: string }
   | { ok: false; error: string; status?: number };
 
+export function isServerlessRuntime() {
+  return (
+    process.env.VERCEL === "1" ||
+    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME) ||
+    Boolean(process.env.NETLIFY)
+  );
+}
+
 export function resolveLlmProvider(): LlmProvider {
   const explicit = process.env.AI_PROVIDER?.trim().toLowerCase();
   if (explicit === "cursor") {
     return "cursor";
   }
   if (explicit === "openai") {
+    return "openai";
+  }
+
+  if (isServerlessRuntime()) {
+    if (process.env.OPENAI_API_KEY?.trim()) {
+      return "openai";
+    }
+    if (process.env.CURSOR_API_KEY?.trim()) {
+      return "cursor";
+    }
     return "openai";
   }
 
@@ -102,6 +120,9 @@ function parseOpenAiErrorMessage(status: number, body: string) {
 
 function missingKeyMessage(provider: LlmProvider) {
   if (provider === "cursor") {
+    if (isServerlessRuntime()) {
+      return "CURSOR_API_KEY is not set on Vercel. Add OPENAI_API_KEY (recommended) or CURSOR_API_KEY for cloud agents.";
+    }
     return "CURSOR_API_KEY is not set. Add it to .env and restart the dev server.";
   }
 
@@ -184,15 +205,24 @@ async function callCursorJsonChat<T>({
   apiKey: string;
   model: string;
 }): Promise<LlmChatJsonResult<T>> {
-  const cwd = process.env.CURSOR_CWD?.trim() || process.cwd();
   const prompt = `${system}\n\n${user}`;
 
+  const options: AgentOptions = {
+    apiKey,
+    model: { id: model },
+  };
+
+  if (isServerlessRuntime()) {
+    // Local Cursor agents need disk under ~/.cursor — unavailable on Vercel.
+    options.cloud = { env: { type: "cloud" } };
+  } else {
+    const cwd = process.env.CURSOR_CWD?.trim() || process.cwd();
+    options.local = { cwd };
+  }
+
   try {
-    const result = await Agent.prompt(prompt, {
-      apiKey,
-      model: { id: model },
-      local: { cwd },
-    });
+    const { Agent, CursorAgentError } = await import("@cursor/sdk");
+    const result = await Agent.prompt(prompt, options);
 
     if (result.status !== "finished") {
       return { ok: false, error: `Cursor agent run ${result.status}.` };
@@ -209,6 +239,7 @@ async function callCursorJsonChat<T>({
 
     return { ok: true, data: parsed, model: result.model?.id ?? model };
   } catch (error) {
+    const { CursorAgentError } = await import("@cursor/sdk");
     if (error instanceof CursorAgentError) {
       return { ok: false, error: error.message };
     }

@@ -40,7 +40,7 @@ Set at least one:
    | `ADMIN_NOTIFICATION_EMAIL` | For signup alerts |
    | `RESEND_API_KEY` | For signup alerts |
    | `RESEND_FROM_EMAIL` | Optional |
-   | `CURSOR_API_KEY` or `OPENAI_API_KEY` | For AI tailoring |
+   | `CURSOR_API_KEY` or `OPENAI_API_KEY` | For AI tailoring — on Vercel, `OPENAI_API_KEY` is recommended |
 
 5. Click **Deploy**.
 
@@ -62,6 +62,7 @@ npm run dev
 ## Troubleshooting
 
 - **"This page couldn't load" / server error** → Add `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` in Vercel → Settings → Environment Variables, then **Redeploy**. Push the latest code fix if you haven't already.
-- **Signups don’t persist on Vercel** → Add Upstash Redis env vars and redeploy.
+- **"Could not save data" on signup** → In Upstash console open your database → **REST API** tab. Copy `UPSTASH_REDIS_REST_URL` (must start with `https://`) and `UPSTASH_REDIS_REST_TOKEN` into Vercel → **Production** env vars, then **Redeploy**. Do not use the `redis://` URL. Test: `https://your-app.vercel.app/api/health/db` should return `{"ok":true,"redis":true}`.
+- **Signups don’t persist on Vercel** → Same as above — verify Redis with `/api/health/db`.
 - **No signup emails** → Check `ADMIN_NOTIFICATION_EMAIL`, `RESEND_API_KEY`, and Resend dashboard logs.
-- **AI tailoring fails** → Verify `CURSOR_API_KEY` or `OPENAI_API_KEY` in Vercel env settings.
+- **AI tailoring fails** → On Vercel, add `OPENAI_API_KEY` (recommended) or keep `CURSOR_API_KEY` (uses Cursor cloud agents). Do not use local Cursor SDK on serverless.
