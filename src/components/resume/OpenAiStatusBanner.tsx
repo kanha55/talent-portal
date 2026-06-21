@@ -70,16 +70,21 @@ export function OpenAiStatusBanner() {
             </>
           ) : null}
         </p>
-      ) : status.provider === "openai" && status.status === 429 ? (
+      ) : status.provider === "openai" &&
+        (status.status === 429 ||
+          status.error?.toLowerCase().includes("quota") ||
+          status.error?.toLowerCase().includes("billing")) ? (
         <p className="mt-2 leading-6">
-          Add billing or credits at{" "}
+          Add billing at{" "}
           <a
             href="https://platform.openai.com/settings/organization/billing"
             className="font-medium text-amber-900 underline"
           >
             platform.openai.com
           </a>
-          , or switch to <code className="rounded bg-amber-100 px-1">CURSOR_API_KEY</code>.
+          , or in Vercel set{" "}
+          <code className="rounded bg-amber-100 px-1">AI_PROVIDER=cursor</code> and ensure{" "}
+          <code className="rounded bg-amber-100 px-1">CURSOR_API_KEY</code> is set, then redeploy.
         </p>
       ) : null}
     </div>

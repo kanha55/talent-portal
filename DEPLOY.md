@@ -40,7 +40,8 @@ Set at least one:
    | `ADMIN_NOTIFICATION_EMAIL` | For signup alerts |
    | `RESEND_API_KEY` | For signup alerts |
    | `RESEND_FROM_EMAIL` | Optional |
-   | `CURSOR_API_KEY` or `OPENAI_API_KEY` | For AI tailoring — on Vercel, `OPENAI_API_KEY` is recommended |
+   | `CURSOR_API_KEY` or `OPENAI_API_KEY` | AI tailoring — on Vercel, `CURSOR_API_KEY` is default if both are set |
+| `AI_PROVIDER` | Optional: `cursor` or `openai` |
 
 5. Click **Deploy**.
 

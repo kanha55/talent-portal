@@ -32,11 +32,11 @@ export function resolveLlmProvider(): LlmProvider {
   }
 
   if (isServerlessRuntime()) {
-    if (process.env.OPENAI_API_KEY?.trim()) {
-      return "openai";
-    }
     if (process.env.CURSOR_API_KEY?.trim()) {
       return "cursor";
+    }
+    if (process.env.OPENAI_API_KEY?.trim()) {
+      return "openai";
     }
     return "openai";
   }
@@ -105,17 +105,33 @@ function parseJsonFromText<T>(text: string): T | null {
   return null;
 }
 
-function parseOpenAiErrorMessage(status: number, body: string) {
+function parseOpenAiErrorPayload(body: string): OpenAiErrorPayload["error"] | null {
   try {
     const payload = JSON.parse(body) as OpenAiErrorPayload;
-    if (payload.error?.message) {
-      return payload.error.message;
-    }
+    return payload.error ?? null;
   } catch {
-    // ignore JSON parse errors
+    return null;
+  }
+}
+
+function parseOpenAiErrorMessage(status: number, body: string) {
+  const error = parseOpenAiErrorPayload(body);
+  if (error?.message) {
+    return error.message;
   }
 
   return `OpenAI request failed with status ${status}.`;
+}
+
+function isOpenAiQuotaOrRateLimitError(status?: number, errorMessage?: string) {
+  const message = errorMessage?.toLowerCase() ?? "";
+  return (
+    status === 429 ||
+    message.includes("quota") ||
+    message.includes("rate limit") ||
+    message.includes("billing") ||
+    message.includes("insufficient_quota")
+  );
 }
 
 function missingKeyMessage(provider: LlmProvider) {
@@ -275,7 +291,7 @@ export async function callLlmJsonChat<T>({
     });
   }
 
-  return fetchOpenAiJsonChat<T>({
+  const openaiResult = await fetchOpenAiJsonChat<T>({
     system,
     user,
     temperature,
@@ -283,6 +299,29 @@ export async function callLlmJsonChat<T>({
     baseUrl: config.baseUrl,
     model: config.model,
   });
+
+  if (openaiResult.ok) {
+    return openaiResult;
+  }
+
+  const cursorApiKey = process.env.CURSOR_API_KEY?.trim();
+  const cursorModel = process.env.CURSOR_MODEL?.trim() || "composer-2.5";
+  if (
+    cursorApiKey &&
+    isOpenAiQuotaOrRateLimitError(openaiResult.status, openaiResult.error)
+  ) {
+    const cursorResult = await callCursorJsonChat<T>({
+      system,
+      user,
+      apiKey: cursorApiKey,
+      model: cursorModel,
+    });
+    if (cursorResult.ok) {
+      return cursorResult;
+    }
+  }
+
+  return openaiResult;
 }
 
 export async function checkLlmConnection() {
