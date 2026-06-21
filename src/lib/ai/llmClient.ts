@@ -1,4 +1,7 @@
 import type { AgentOptions } from "@cursor/sdk";
+import { mkdir } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 type OpenAiErrorPayload = {
   error?: {
@@ -210,6 +213,17 @@ async function fetchOpenAiJsonChat<T>({
   }
 }
 
+async function buildCursorLocalOptions(): Promise<NonNullable<AgentOptions["local"]>> {
+  const { JsonlLocalAgentStore } = await import("@cursor/sdk");
+  const storeRoot =
+    process.env.CURSOR_SDK_STORE_PATH?.trim() ||
+    path.join(os.tmpdir(), "talent-portal-cursor-sdk");
+  await mkdir(storeRoot, { recursive: true });
+  const store = new JsonlLocalAgentStore(storeRoot);
+  const cwd = process.env.CURSOR_CWD?.trim() || os.tmpdir();
+  return { cwd, store };
+}
+
 async function callCursorJsonChat<T>({
   system,
   user,
@@ -229,8 +243,9 @@ async function callCursorJsonChat<T>({
   };
 
   if (isServerlessRuntime()) {
-    // Local Cursor agents need disk under ~/.cursor — unavailable on Vercel.
-    options.cloud = { env: { type: "cloud" } };
+    // Cloud agents need a valid Cursor cloud environment on your team.
+    // Use /tmp-backed local store instead (writable on Vercel Lambda).
+    options.local = await buildCursorLocalOptions();
   } else {
     const cwd = process.env.CURSOR_CWD?.trim() || process.cwd();
     options.local = { cwd };

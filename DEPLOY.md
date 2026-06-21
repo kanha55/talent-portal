@@ -66,4 +66,4 @@ npm run dev
 - **"Could not save data" on signup** → In Upstash console open your database → **REST API** tab. Copy `UPSTASH_REDIS_REST_URL` (must start with `https://`) and `UPSTASH_REDIS_REST_TOKEN` into Vercel → **Production** env vars, then **Redeploy**. Do not use the `redis://` URL. Test: `https://your-app.vercel.app/api/health/db` should return `{"ok":true,"redis":true}`.
 - **Signups don’t persist on Vercel** → Same as above — verify Redis with `/api/health/db`.
 - **No signup emails** → Check `ADMIN_NOTIFICATION_EMAIL`, `RESEND_API_KEY`, and Resend dashboard logs.
-- **AI tailoring fails** → On Vercel, add `OPENAI_API_KEY` (recommended) or keep `CURSOR_API_KEY` (uses Cursor cloud agents). Do not use local Cursor SDK on serverless.
+- **AI tailoring fails** → On Vercel, Cursor uses a `/tmp` store (not cloud agents). If Cursor still fails, use Groq: `OPENAI_API_KEY` + `OPENAI_BASE_URL=https://api.groq.com/openai/v1` + `AI_PROVIDER=openai`.

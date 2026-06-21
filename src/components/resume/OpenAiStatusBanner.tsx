@@ -86,6 +86,16 @@ export function OpenAiStatusBanner() {
           <code className="rounded bg-amber-100 px-1">AI_PROVIDER=cursor</code> and ensure{" "}
           <code className="rounded bg-amber-100 px-1">CURSOR_API_KEY</code> is set, then redeploy.
         </p>
+      ) : status.provider === "cursor" &&
+        status.error?.toLowerCase().includes("environment_public_id") ? (
+        <p className="mt-2 leading-6">
+          Cursor cloud is not enabled for your account. Redeploy the latest code, or use a free
+          Groq key: set <code className="rounded bg-amber-100 px-1">OPENAI_API_KEY</code>,{" "}
+          <code className="rounded bg-amber-100 px-1">
+            OPENAI_BASE_URL=https://api.groq.com/openai/v1
+          </code>
+          , and <code className="rounded bg-amber-100 px-1">AI_PROVIDER=openai</code> on Vercel.
+        </p>
       ) : null}
     </div>
   );
